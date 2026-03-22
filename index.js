@@ -39,11 +39,9 @@ function fetchJSON(url, referer) {
 function fetchText(url, referer) {
   return new Promise((resolve, reject) => {
     const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-      'Referer': referer || 'https://www.google.com/',
-      'Cache-Control': 'no-cache'
+      'Referer': referer || 'https://www.google.com/'
     };
     https.get(url, { headers, timeout: 15000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -73,10 +71,6 @@ function parseRSSItems(xml) {
     if (title) items.push({ title: title, link: link, pubDate: pubDate });
   }
   return items;
-}
-
-function stripTags(str) {
-  return (str || '').replace(/<[^>]*>/g, '').trim();
 }
 
 // ============================================================
@@ -145,13 +139,11 @@ app.get('/movers', async (req, res) => {
 });
 
 // ============================================================
-// /ipos/upcoming — BSE + Moneycontrol Scraping
+// /ipos/upcoming — BSE Official API (Government)
 // ============================================================
 app.get('/ipos/upcoming', async (req, res) => {
   try {
     var ipos = [];
-
-    // Source 1: BSE Official API
     try {
       var data = await fetchJSON('https://api.bseindia.com/BseIndiaAPI/api/IPODetail/w?type=upcoming', 'https://www.bseindia.com/');
       if (Array.isArray(data)) {
@@ -167,75 +159,18 @@ app.get('/ipos/upcoming', async (req, res) => {
         });
       }
     } catch(bseErr) { console.log('BSE IPO failed:', bseErr.message); }
-
-    // Source 2: Moneycontrol IPO page scraping
-    try {
-      var html = await fetchText('https://www.moneycontrol.com/ipo/ipo-upcoming.html', 'https://www.moneycontrol.com/');
-      // Extract IPO rows from table
-      var tableRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-      var tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-      var row;
-      while ((row = tableRegex.exec(html)) !== null) {
-        var cells = [];
-        var td;
-        var rowHtml = row[1];
-        while ((td = tdRegex.exec(rowHtml)) !== null) {
-          cells.push(stripTags(td[1]));
-        }
-        tdRegex.lastIndex = 0;
-        // Typical MC table: Company, Open, Close, Issue Price, Issue Size, Type
-        if (cells.length >= 4 && cells[0] && !cells[0].match(/company|name|sr/i)) {
-          var alreadyExists = ipos.some(function(existing) {
-            return existing.name.toLowerCase().includes(cells[0].toLowerCase().substring(0, 10));
-          });
-          if (!alreadyExists) {
-            ipos.push({
-              name: cells[0],
-              issueType: cells.length >= 6 ? cells[5] || 'IPO' : 'IPO',
-              priceBand: cells.length >= 4 ? cells[3] || '' : '',
-              openDate: cells[1] || '',
-              closeDate: cells[2] || '',
-              issueSize: cells.length >= 5 ? cells[4] || '' : ''
-            });
-          }
-        }
-      }
-    } catch(mcErr) { console.log('MC IPO scrape failed:', mcErr.message); }
-
-    // Source 3: NSE fallback
-    if (ipos.length === 0) {
-      try {
-        var nseData = await fetchJSON('https://www.nseindia.com/api/ipo-current-issue', 'https://www.nseindia.com/');
-        if (Array.isArray(nseData)) {
-          nseData.forEach(function(ipo) {
-            ipos.push({
-              name: ipo.companyName || '',
-              issueType: ipo.issueType || 'IPO',
-              priceBand: (ipo.minPrice || '') + '-' + (ipo.maxPrice || ''),
-              openDate: ipo.issueStartDate || '',
-              closeDate: ipo.issueEndDate || '',
-              issueSize: ipo.issueSize || ''
-            });
-          });
-        }
-      } catch(nseErr) { console.log('NSE IPO failed:', nseErr.message); }
-    }
-
     res.json(ipos);
   } catch(e) {
-    console.error('IPOs upcoming error:', e.message);
     res.json([]);
   }
 });
 
 // ============================================================
-// /ipos/recent — BSE + Moneycontrol Scraping
+// /ipos/recent — BSE Official API (Government)
 // ============================================================
 app.get('/ipos/recent', async (req, res) => {
   try {
     var ipos = [];
-
-    // Source 1: BSE Official API
     try {
       var data = await fetchJSON('https://api.bseindia.com/BseIndiaAPI/api/IPODetail/w?type=recent', 'https://www.bseindia.com/');
       if (Array.isArray(data)) {
@@ -251,42 +186,8 @@ app.get('/ipos/recent', async (req, res) => {
         });
       }
     } catch(bseErr) { console.log('BSE recent IPO failed:', bseErr.message); }
-
-    // Source 2: Moneycontrol recent IPOs
-    try {
-      var html = await fetchText('https://www.moneycontrol.com/ipo/ipo-listed.html', 'https://www.moneycontrol.com/');
-      var tableRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-      var tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-      var row;
-      while ((row = tableRegex.exec(html)) !== null && ipos.length < 15) {
-        var cells = [];
-        var td;
-        var rowHtml = row[1];
-        while ((td = tdRegex.exec(rowHtml)) !== null) {
-          cells.push(stripTags(td[1]));
-        }
-        tdRegex.lastIndex = 0;
-        if (cells.length >= 3 && cells[0] && !cells[0].match(/company|name|sr/i)) {
-          var alreadyExists = ipos.some(function(existing) {
-            return existing.name.toLowerCase().includes(cells[0].toLowerCase().substring(0, 10));
-          });
-          if (!alreadyExists) {
-            ipos.push({
-              name: cells[0],
-              issueType: 'Listed',
-              priceBand: cells.length >= 4 ? cells[3] || '' : '',
-              openDate: cells[1] || '',
-              closeDate: cells[2] || '',
-              issueSize: cells.length >= 5 ? cells[4] || '' : ''
-            });
-          }
-        }
-      }
-    } catch(mcErr) { console.log('MC recent IPO scrape failed:', mcErr.message); }
-
     res.json(ipos);
   } catch(e) {
-    console.error('IPOs recent error:', e.message);
     res.json([]);
   }
 });
@@ -301,7 +202,6 @@ app.get('/picks', async (req, res) => {
       { url: 'https://economictimes.indiatimes.com/markets/stocks/recos/rssfeeds/2146844.cms', tag: 'ET Recommend' },
       { url: 'https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms', tag: 'Market News' }
     ];
-
     for (var i = 0; i < urls.length && picks.length < 10; i++) {
       try {
         var xml = await fetchText(urls[i].url, 'https://economictimes.indiatimes.com/');
@@ -312,10 +212,8 @@ app.get('/picks', async (req, res) => {
         });
       } catch(e) { console.log('Picks source ' + i + ' failed'); }
     }
-
     res.json(picks);
   } catch(e) {
-    console.error('Picks error:', e.message);
     res.json([]);
   }
 });
@@ -326,16 +224,10 @@ app.get('/picks', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'SRJahir Stocks API v2',
-    sources: {
-      movers: 'BSE India (Government)',
-      ipos: 'BSE India + Moneycontrol',
-      news: 'Economic Times RSS',
-      picks: 'ET Recommendations RSS'
-    },
+    service: 'SRJahir Stocks API v3',
     endpoints: ['/news', '/movers', '/ipos/upcoming', '/ipos/recent', '/picks'],
     timestamp: new Date().toISOString()
   });
 });
 
-app.listen(PORT, () => console.log('SRJahir Stocks API v2 running on port ' + PORT));
+app.listen(PORT, () => console.log('SRJahir Stocks API v3 running on port ' + PORT));
