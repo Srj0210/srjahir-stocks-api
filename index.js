@@ -60,10 +60,6 @@ function cleanCDATA(str) {
   return (str || '').replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim();
 }
 
-function strip(str) {
-  return (str || '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/&#8377;/g, '₹').trim();
-}
-
 function parseRSSItems(xml) {
   var items = [];
   var regex = /<item>([\s\S]*?)<\/item>/g;
@@ -78,65 +74,89 @@ function parseRSSItems(xml) {
   return items;
 }
 
-// ============================================================
-// Parse Moneycontrol IPO page — extract from description text
-// Pattern: "XYZ Ltd IPO price band is set at 375 to 395"
-// Pattern: "opens for subscription on 2026-03-24 and closes on 2026-03-27"
-// ============================================================
-function parseMoneycontrolIPOs(html) {
-  var ipos = [];
-  
-  // Split by IPO blocks — each IPO has description with dates and prices
-  var descRegex = /(?:<p[^>]*>)?\s*([\w\s&.,'\-()]+(?:Ltd|Limited)[^<]*IPO)\s+(?:opens\s+for\s+subscription\s+on\s+(\d{4}-\d{2}-\d{2})\s+and\s+closes\s+on\s+(\d{4}-\d{2}-\d{2})[^<]*price\s+band\s+is\s+set\s+at\s+([\d,.]+)\s+to\s+([\d,.]+)(?:[^<]*per\s+share)?)/gi;
-  
-  var match;
-  while ((match = descRegex.exec(html)) !== null) {
-    var fullName = match[1].replace(/\s+IPO\s*$/i, '').replace(/\s+/g, ' ').trim();
-    var openDate = match[2];
-    var closeDate = match[3];
-    var priceLow = match[4];
-    var priceHigh = match[5];
-    
-    // Determine type from surrounding HTML
-    var surroundStart = Math.max(0, match.index - 500);
-    var surrounding = html.substring(surroundStart, match.index + match[0].length);
-    var type = 'IPO';
-    if (surrounding.match(/SME/i)) type = 'SME';
-    if (surrounding.match(/Mainline/i)) type = 'Mainline';
-    if (surrounding.match(/OFS/i)) type = 'OFS';
-    
-    // Extract issue size from nearby text
-    var issueSize = '';
-    var sizeBlock = html.substring(match.index, match.index + 2000);
-    var sizeMatch = sizeBlock.match(/Issue\s*Size[\s\S]*?<td[^>]*>\s*([\s\S]*?)<\/td>/i);
-    if (sizeMatch) issueSize = strip(sizeMatch[1]);
-    
-    // Format dates nicely
-    var openFormatted = formatDateStr(openDate);
-    var closeFormatted = formatDateStr(closeDate);
-    
-    ipos.push({
-      name: fullName,
-      issueType: type,
-      priceBand: '₹' + priceLow + ' - ₹' + priceHigh,
-      openDate: openFormatted,
-      closeDate: closeFormatted,
-      issueSize: issueSize
-    });
-  }
-  
-  return ipos;
-}
-
-function formatDateStr(dateStr) {
+function formatDate(dateStr) {
   if (!dateStr) return '';
   try {
     var d = new Date(dateStr);
-    var day = String(d.getDate()).padStart(2, '0');
-    var mon = String(d.getMonth() + 1).padStart(2, '0');
-    var year = d.getFullYear();
-    return day + '/' + mon + '/' + year;
+    if (isNaN(d)) return dateStr;
+    return String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
   } catch(e) { return dateStr; }
+}
+
+// ============================================================
+// Parse Moneycontrol JSON embedded in HTML page
+// ============================================================
+function extractMCIpos(html, statusFilter) {
+  var ipos = [];
+  
+  // Find JSON arrays in the HTML — MC embeds IPO data as JSON
+  var jsonRegex = /\[\s*\{[^[\]]*?"company_name"\s*:\s*"[^"]*"[^[\]]*?"ipo_status"\s*:\s*"[^"]*"[\s\S]*?\}\s*\]/g;
+  var match;
+  
+  while ((match = jsonRegex.exec(html)) !== null) {
+    try {
+      var arr = JSON.parse(match[0]);
+      if (Array.isArray(arr)) {
+        arr.forEach(function(ipo) {
+          if (statusFilter && ipo.ipo_status && ipo.ipo_status.toLowerCase() !== statusFilter.toLowerCase()) {
+            // Also include "Open" for upcoming filter
+            if (statusFilter === 'Upcoming' && ipo.ipo_status !== 'Open') return;
+            if (statusFilter !== 'Upcoming') return;
+          }
+          ipos.push({
+            name: (ipo.company_name || '').replace(/\s*Ltd\.?\s*$/i, ' Ltd').trim(),
+            issueType: ipo.ipo_type || 'IPO',
+            priceBand: (ipo.from_issue_price && ipo.to_issue_price) 
+              ? '₹' + ipo.from_issue_price + ' - ₹' + ipo.to_issue_price 
+              : '',
+            openDate: formatDate(ipo.open_date) || '',
+            closeDate: formatDate(ipo.close_date) || '',
+            issueSize: ipo.issue_size ? '₹' + (ipo.issue_size / 10000000).toFixed(2) + ' Cr' : '',
+            lotSize: ipo.lot_size || '',
+            listingDate: formatDate(ipo.listing_date) || '',
+            totalSubs: ipo.total_subs || '',
+            status: ipo.ipo_status || ''
+          });
+        });
+      }
+    } catch(e) { /* not valid JSON, skip */ }
+  }
+  
+  // Fallback: try to find individual JSON objects
+  if (ipos.length === 0) {
+    var objRegex = /\{"ipo_status"\s*:\s*"(Open|Upcoming)"[\s\S]*?"company_name"\s*:\s*"([^"]+)"[\s\S]*?\}/g;
+    var objMatch;
+    while ((objMatch = objRegex.exec(html)) !== null) {
+      try {
+        var obj = JSON.parse(objMatch[0]);
+        ipos.push({
+          name: (obj.company_name || '').replace(/\s*Ltd\.?\s*$/i, ' Ltd').trim(),
+          issueType: obj.ipo_type || 'IPO',
+          priceBand: (obj.from_issue_price && obj.to_issue_price) 
+            ? '₹' + obj.from_issue_price + ' - ₹' + obj.to_issue_price 
+            : '',
+          openDate: formatDate(obj.open_date) || '',
+          closeDate: formatDate(obj.close_date) || '',
+          issueSize: obj.issue_size ? '₹' + (obj.issue_size / 10000000).toFixed(2) + ' Cr' : '',
+          lotSize: obj.lot_size || '',
+          listingDate: formatDate(obj.listing_date) || '',
+          totalSubs: obj.total_subs || '',
+          status: obj.ipo_status || ''
+        });
+      } catch(e) { /* skip */ }
+    }
+  }
+  
+  // Deduplicate by name
+  var seen = {};
+  ipos = ipos.filter(function(ipo) {
+    var key = ipo.name.toLowerCase().substring(0, 20);
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+  
+  return ipos;
 }
 
 // ============================================================
@@ -204,30 +224,38 @@ app.get('/movers', async (req, res) => {
 });
 
 // ============================================================
-// /ipos/upcoming — Moneycontrol scraping + BSE fallback
+// /ipos/upcoming — Moneycontrol JSON + BSE fallback
 // ============================================================
 app.get('/ipos/upcoming', async (req, res) => {
   try {
     var ipos = [];
 
-    // Source 1: Moneycontrol upcoming IPOs page
+    // Source 1: Moneycontrol — fetch page, extract embedded JSON
     try {
       var html = await fetchText('https://www.moneycontrol.com/ipo/', 'https://www.moneycontrol.com/');
-      ipos = parseMoneycontrolIPOs(html);
+      ipos = extractMCIpos(html);
+      // Filter: only Open + Upcoming
+      ipos = ipos.filter(function(i) {
+        var s = (i.status || '').toLowerCase();
+        return s === 'open' || s === 'upcoming';
+      });
       console.log('MC upcoming IPOs found:', ipos.length);
     } catch(mcErr) { console.log('MC upcoming failed:', mcErr.message); }
 
-    // Also try the upcoming-ipos page
+    // Also try upcoming-ipos page
     if (ipos.length < 3) {
       try {
         var html2 = await fetchText('https://www.moneycontrol.com/ipo/upcoming-ipos/', 'https://www.moneycontrol.com/');
-        var more = parseMoneycontrolIPOs(html2);
+        var more = extractMCIpos(html2);
+        more = more.filter(function(i) {
+          var s = (i.status || '').toLowerCase();
+          return s === 'open' || s === 'upcoming';
+        });
         more.forEach(function(ipo) {
-          var exists = ipos.some(function(e) { return e.name.substring(0, 15) === ipo.name.substring(0, 15); });
+          var exists = ipos.some(function(e) { return e.name.substring(0,15) === ipo.name.substring(0,15); });
           if (!exists) ipos.push(ipo);
         });
-        console.log('MC upcoming-ipos page found:', more.length);
-      } catch(e) { console.log('MC upcoming-ipos page failed'); }
+      } catch(e) {}
     }
 
     // Source 2: BSE API fallback
@@ -258,26 +286,38 @@ app.get('/ipos/upcoming', async (req, res) => {
 });
 
 // ============================================================
-// /ipos/recent — BSE API
+// /ipos/recent — Moneycontrol listed + BSE fallback
 // ============================================================
 app.get('/ipos/recent', async (req, res) => {
   try {
     var ipos = [];
+
+    // Moneycontrol listed/closed IPOs
     try {
-      var data = await fetchJSON('https://api.bseindia.com/BseIndiaAPI/api/IPODetail/w?type=recent', 'https://www.bseindia.com/');
-      if (Array.isArray(data)) {
-        data.forEach(function(ipo) {
-          ipos.push({
-            name: ipo.Issue_Name || '',
-            issueType: ipo.Issue_Type || 'IPO',
-            priceBand: ipo.Price_Band || '',
-            openDate: ipo.Issue_Open || '',
-            closeDate: ipo.Issue_Close || '',
-            issueSize: ipo.Issue_Size || ''
+      var html = await fetchText('https://www.moneycontrol.com/ipo/listed-ipos/', 'https://www.moneycontrol.com/');
+      ipos = extractMCIpos(html);
+      console.log('MC recent IPOs found:', ipos.length);
+    } catch(mcErr) { console.log('MC recent failed:', mcErr.message); }
+
+    // BSE fallback
+    if (ipos.length === 0) {
+      try {
+        var data = await fetchJSON('https://api.bseindia.com/BseIndiaAPI/api/IPODetail/w?type=recent', 'https://www.bseindia.com/');
+        if (Array.isArray(data)) {
+          data.forEach(function(ipo) {
+            ipos.push({
+              name: ipo.Issue_Name || '',
+              issueType: ipo.Issue_Type || 'IPO',
+              priceBand: ipo.Price_Band || '',
+              openDate: ipo.Issue_Open || '',
+              closeDate: ipo.Issue_Close || '',
+              issueSize: ipo.Issue_Size || ''
+            });
           });
-        });
-      }
-    } catch(bseErr) { console.log('BSE recent IPO failed:', bseErr.message); }
+        }
+      } catch(bseErr) { console.log('BSE recent IPO failed:', bseErr.message); }
+    }
+
     res.json(ipos);
   } catch(e) {
     res.json([]);
@@ -301,7 +341,7 @@ app.get('/picks', async (req, res) => {
         items.slice(0, 10 - picks.length).forEach(function(item) {
           picks.push({ stock: item.title, reason: urls[i].tag, link: item.link });
         });
-      } catch(e) { console.log('Picks source ' + i + ' failed'); }
+      } catch(e) {}
     }
     res.json(picks);
   } catch(e) {
@@ -315,10 +355,10 @@ app.get('/picks', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'SRJahir Stocks API v4',
+    service: 'SRJahir Stocks API v5',
     endpoints: ['/news', '/movers', '/ipos/upcoming', '/ipos/recent', '/picks'],
     timestamp: new Date().toISOString()
   });
 });
 
-app.listen(PORT, () => console.log('SRJahir Stocks API v4 running on port ' + PORT));
+app.listen(PORT, () => console.log('SRJahir Stocks API v5 running on port ' + PORT));
