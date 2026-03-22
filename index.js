@@ -55,18 +55,20 @@ function fetchText(url, referer) {
   });
 }
 
+function cleanCDATA(str) {
+  return (str || '').replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim();
+}
+
 function parseRSSItems(xml) {
   var items = [];
   var regex = /<item>([\s\S]*?)<\/item>/g;
   var m;
   while ((m = regex.exec(xml)) !== null) {
     var block = m[1];
-    var title = (block.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>/) || block.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '';
-    var link = (block.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || '';
-    var pubDate = (block.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || '';
-    title = title.trim();
-    link = link.trim();
-    if (title) items.push({ title: title, link: link, pubDate: pubDate.trim() });
+    var title = cleanCDATA((block.match(/<title>([\s\S]*?)<\/title>/) || [])[1]);
+    var link = cleanCDATA((block.match(/<link>([\s\S]*?)<\/link>/) || [])[1]);
+    var pubDate = cleanCDATA((block.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1]);
+    if (title) items.push({ title: title, link: link, pubDate: pubDate });
   }
   return items;
 }
@@ -115,7 +117,7 @@ app.get('/movers', async (req, res) => {
     } catch(e1) { console.log('BSE gainers failed:', e1.message); }
 
     try {
-      var data2 = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seession=&type=loser', REF);
+      var data2 = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=loser', REF);
       if (data2 && Array.isArray(data2.Table)) {
         data2.Table.slice(0, 25).forEach(function(l) {
           movers.push({
@@ -213,18 +215,27 @@ app.get('/ipos/recent', async (req, res) => {
 });
 
 // ============================================================
-// /picks — ET Recommendations RSS
+// /picks — ET Recommendations + News Fallback
 // ============================================================
 app.get('/picks', async (req, res) => {
   try {
-    var xml = await fetchText(
-      'https://economictimes.indiatimes.com/markets/stocks/recos/rssfeeds/2146844.cms',
-      'https://economictimes.indiatimes.com/'
-    );
-    var items = parseRSSItems(xml);
-    var picks = items.slice(0, 10).map(function(item) {
-      return { stock: item.title, reason: 'ET Recommend', link: item.link };
-    });
+    var picks = [];
+    var urls = [
+      { url: 'https://economictimes.indiatimes.com/markets/stocks/recos/rssfeeds/2146844.cms', tag: 'ET Recommend' },
+      { url: 'https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms', tag: 'Market News' }
+    ];
+
+    for (var i = 0; i < urls.length && picks.length < 10; i++) {
+      try {
+        var xml = await fetchText(urls[i].url, 'https://economictimes.indiatimes.com/');
+        var items = parseRSSItems(xml);
+        var needed = 10 - picks.length;
+        items.slice(0, needed).forEach(function(item) {
+          picks.push({ stock: item.title, reason: urls[i].tag, link: item.link });
+        });
+      } catch(e) { console.log('Picks source ' + i + ' failed'); }
+    }
+
     res.json(picks);
   } catch(e) {
     console.error('Picks error:', e.message);
