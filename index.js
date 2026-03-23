@@ -21,16 +21,16 @@ function fetchJSON(url, referer) {
       'Referer': referer || 'https://www.bseindia.com/',
       'Origin': referer ? new URL(referer).origin : 'https://www.bseindia.com'
     };
-    https.get(url, { headers, timeout: 15000 }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchJSON(res.headers.location, referer).then(resolve).catch(reject);
+    https.get(url, { headers, timeout: 15000 }, (resp) => {
+      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+        fetchJSON(resp.headers.location, referer).then(resolve).catch(reject);
         return;
       }
       let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error('JSON parse failed')); }
+        catch(e) { reject(new Error('JSON parse failed: ' + data.substring(0, 100))); }
       });
     }).on('error', reject).on('timeout', function() { this.destroy(); reject(new Error('Timeout')); });
   });
@@ -44,14 +44,14 @@ function fetchText(url, referer) {
       'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
       'Referer': referer || 'https://www.google.com/'
     };
-    https.get(url, { headers, timeout: 20000 }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchText(res.headers.location, referer).then(resolve).catch(reject);
+    https.get(url, { headers, timeout: 20000 }, (resp) => {
+      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+        fetchText(resp.headers.location, referer).then(resolve).catch(reject);
         return;
       }
       let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => resolve(data));
+      resp.on('data', c => data += c);
+      resp.on('end', () => resolve(data));
     }).on('error', reject).on('timeout', function() { this.destroy(); reject(new Error('Timeout')); });
   });
 }
@@ -87,28 +87,30 @@ function formatDate(dateStr) {
   } catch(e) { return dateStr; }
 }
 
-// ============================================================
-// ROBUST TABLE PARSER — extracts rows from HTML tables
-// Returns array of arrays (each sub-array = one row of cell text)
-// ============================================================
-function parseHTMLTable(html) {
-  var rows = [];
-  var trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  var trMatch;
-  while ((trMatch = trRegex.exec(html)) !== null) {
-    var tdRegex = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
-    var cells = [];
-    var td;
-    while ((td = tdRegex.exec(trMatch[1])) !== null) {
-      cells.push(strip(td[1]));
-    }
-    if (cells.length >= 2) rows.push(cells);
+const BSE = 'https://api.bseindia.com/BseIndiaAPI/api';
+const BSE_REF = 'https://www.bseindia.com/';
+
+// Parse BSE StockReachGraph response
+function parseBSEStocks(data) {
+  var stocks = [];
+  if (data && Array.isArray(data.Table)) {
+    data.Table.forEach(function(s) {
+      stocks.push({
+        stock: s.scripname || s.scrip_nm || s.SCRIP_CD || '',
+        price: parseFloat(s.ltradert || s.LTP || s.ltp || 0),
+        change: parseFloat(s.perchg || s.Perchg || s.PERCHG || 0),
+        volume: parseInt(s.trd_qty || s.nooftrades || 0),
+        high52: parseFloat(s.hi_52_wk || s['52_wk_hi'] || 0),
+        low52: parseFloat(s.lo_52_wk || s['52_wk_lo'] || 0),
+        pe: '', mcap: 0
+      });
+    });
   }
-  return rows;
+  return stocks;
 }
 
 // ============================================================
-// Extract Moneycontrol embedded JSON from HTML
+// Extract Moneycontrol embedded JSON (for IPOs)
 // ============================================================
 function extractMCIpos(html) {
   var ipos = [];
@@ -145,60 +147,6 @@ function extractMCIpos(html) {
 }
 
 // ============================================================
-// MOVERS PARSER — Extracts stocks from MC table HTML
-// Improved: handles links inside cells, numeric detection
-// ============================================================
-function extractMovers(html) {
-  var movers = [];
-  var rows = parseHTMLTable(html);
-  
-  for (var r = 0; r < rows.length && movers.length < 30; r++) {
-    var cells = rows[r];
-    if (cells.length < 4) continue;
-    
-    // First cell = stock name (skip headers)
-    var name = cells[0];
-    if (!name || name.length < 2) continue;
-    if (/^(company|stock|name|sr|s\.no|#|high|low)/i.test(name)) continue;
-    
-    // Find numeric cells for price and change%
-    var price = 0, changePct = 0;
-    var nums = [];
-    for (var c = 1; c < cells.length; c++) {
-      var val = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
-      if (/^-?\d+\.?\d*$/.test(val)) {
-        nums.push({ idx: c, val: parseFloat(val) });
-      }
-    }
-    
-    // Typically: Price is the first large number, Change% is a small number
-    if (nums.length >= 2) {
-      // Find price (largest absolute value > 5)
-      var priceNum = nums.find(n => Math.abs(n.val) > 5);
-      if (priceNum) price = priceNum.val;
-      
-      // Find change% (between -100 and +100, different from price)
-      var changeNum = nums.find(n => n !== priceNum && Math.abs(n.val) < 100);
-      if (changeNum) changePct = changeNum.val;
-      
-      // If no good price found, use first number
-      if (price === 0 && nums.length > 0) price = nums[0].val;
-      if (changePct === 0 && nums.length > 1) {
-        // Last number is often the %change
-        var last = nums[nums.length - 1];
-        if (Math.abs(last.val) < 100) changePct = last.val;
-      }
-    }
-    
-    if (name && (price > 0 || changePct !== 0)) {
-      movers.push({ stock: name, price: price, change: changePct, pe: '', mcap: 0 });
-    }
-  }
-  
-  return movers;
-}
-
-// ============================================================
 // /news — ET Stock News RSS
 // ============================================================
 app.get('/news', async (req, res) => {
@@ -218,57 +166,62 @@ app.get('/news', async (req, res) => {
 });
 
 // ============================================================
-// /movers — Moneycontrol Gainers + Losers (FIXED price extraction)
+// /movers — BSE API Primary (reliable JSON) + MC fallback
 // ============================================================
 app.get('/movers', async (req, res) => {
   try {
     var movers = [];
 
-    // Source 1: MC Top Gainers
+    // PRIMARY: BSE API — returns proper JSON with price + change%
     try {
-      var ghtml = await fetchText('https://www.moneycontrol.com/stocks/marketstats/nsegainer/index.php', 'https://www.moneycontrol.com/');
-      var gainers = extractMovers(ghtml);
-      console.log('MC gainers found:', gainers.length);
-      movers = movers.concat(gainers);
-    } catch(e) { console.log('MC gainers failed:', e.message); }
+      var gainData = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=gainer', BSE_REF);
+      var gainers = parseBSEStocks(gainData);
+      console.log('BSE gainers:', gainers.length);
+      movers = movers.concat(gainers.slice(0, 25));
+    } catch(e) { console.log('BSE gainers failed:', e.message); }
 
-    // Source 2: MC Top Losers
     try {
-      var lhtml = await fetchText('https://www.moneycontrol.com/stocks/marketstats/nseloser/index.php', 'https://www.moneycontrol.com/');
-      var losers = extractMovers(lhtml);
-      // Make sure losers have negative change
-      losers.forEach(function(l) { if (l.change > 0) l.change = -l.change; });
-      console.log('MC losers found:', losers.length);
-      movers = movers.concat(losers);
-    } catch(e) { console.log('MC losers failed:', e.message); }
+      var loseData = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=loser', BSE_REF);
+      var losers = parseBSEStocks(loseData);
+      console.log('BSE losers:', losers.length);
+      movers = movers.concat(losers.slice(0, 25));
+    } catch(e) { console.log('BSE losers failed:', e.message); }
 
-    // Fallback: BSE API
+    // FALLBACK: Moneycontrol HTML tables (if BSE empty)
     if (movers.length === 0) {
       try {
-        var BSE = 'https://api.bseindia.com/BseIndiaAPI/api';
-        var REF = 'https://www.bseindia.com/';
-        var data = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seession=&type=gainer', REF);
-        if (data && Array.isArray(data.Table)) {
-          data.Table.slice(0, 25).forEach(function(g) {
-            movers.push({
-              stock: g.scripname || g.scrip_nm || '',
-              price: parseFloat(g.ltradert || g.LTP || 0),
-              change: parseFloat(g.perchg || g.Perchg || 0),
-              pe: '', mcap: 0
-            });
-          });
+        var ghtml = await fetchText('https://www.moneycontrol.com/stocks/marketstats/nsegainer/index.php', 'https://www.moneycontrol.com/');
+        // Parse table rows
+        var trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+        var trMatch;
+        while ((trMatch = trRegex.exec(ghtml)) !== null && movers.length < 30) {
+          var tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+          var cells = [];
+          var td;
+          while ((td = tdRegex.exec(trMatch[1])) !== null) cells.push(strip(td[1]));
+          if (cells.length >= 5) {
+            var name = cells[0];
+            if (!name || name.length < 2 || /^(company|stock|name|sr)/i.test(name)) continue;
+            var price = parseFloat((cells[1]||'0').replace(/,/g,''));
+            // Last numeric cell that's < 100 is likely change%
+            var changePct = 0;
+            for (var c = cells.length - 1; c >= 2; c--) {
+              var v = parseFloat(cells[c].replace(/[,%()]/g,''));
+              if (!isNaN(v) && Math.abs(v) < 100) { changePct = v; break; }
+            }
+            if (name && price > 0) movers.push({ stock: name, price: price, change: changePct, pe: '', mcap: 0 });
+          }
         }
-      } catch(e) {}
+        console.log('MC gainers fallback:', movers.length);
+      } catch(e) { console.log('MC fallback failed:', e.message); }
     }
 
-    // Sort: gainers first (high change), then losers
+    // Sort & deduplicate
     movers.sort(function(a, b) { return b.change - a.change; });
-    
-    // Deduplicate
     var seen = {};
     movers = movers.filter(function(m) {
-      var key = m.stock.toLowerCase().substring(0, 15);
-      if (seen[key]) return false;
+      var key = (m.stock || '').toLowerCase().substring(0, 15);
+      if (!key || seen[key]) return false;
       seen[key] = true; return true;
     });
 
@@ -286,8 +239,6 @@ app.get('/movers', async (req, res) => {
 app.get('/ipos/upcoming', async (req, res) => {
   try {
     var ipos = [];
-
-    // Try main MC IPO page
     try {
       var html = await fetchText('https://www.moneycontrol.com/ipo/', 'https://www.moneycontrol.com/');
       ipos = extractMCIpos(html);
@@ -295,405 +246,347 @@ app.get('/ipos/upcoming', async (req, res) => {
         var s = (i.status || '').toLowerCase();
         return s === 'open' || s === 'upcoming';
       });
-      console.log('MC upcoming IPOs found:', ipos.length);
-    } catch(mcErr) { console.log('MC upcoming failed:', mcErr.message); }
+      console.log('MC upcoming IPOs:', ipos.length);
+    } catch(e) {}
 
-    // Try upcoming-ipos page too
     if (ipos.length < 3) {
       try {
         var html2 = await fetchText('https://www.moneycontrol.com/ipo/upcoming-ipos/', 'https://www.moneycontrol.com/');
         var more = extractMCIpos(html2);
-        more = more.filter(function(i) {
-          var s = (i.status || '').toLowerCase();
-          return s === 'open' || s === 'upcoming';
-        });
-        more.forEach(function(ipo) {
-          var exists = ipos.some(function(e) { return e.name.substring(0,15) === ipo.name.substring(0,15); });
-          if (!exists) ipos.push(ipo);
-        });
+        more.filter(function(i) { var s=(i.status||'').toLowerCase(); return s==='open'||s==='upcoming'; })
+          .forEach(function(ipo) {
+            if (!ipos.some(function(e) { return e.name.substring(0,15) === ipo.name.substring(0,15); }))
+              ipos.push(ipo);
+          });
       } catch(e) {}
     }
 
-    // BSE fallback
     if (ipos.length === 0) {
       try {
-        var data = await fetchJSON('https://api.bseindia.com/BseIndiaAPI/api/IPODetail/w?type=upcoming', 'https://www.bseindia.com/');
-        if (Array.isArray(data)) {
-          data.forEach(function(ipo) {
-            ipos.push({
-              name: ipo.Issue_Name || '', issueType: ipo.Issue_Type || 'IPO',
-              priceBand: ipo.Price_Band || '', openDate: ipo.Issue_Open || '',
-              closeDate: ipo.Issue_Close || '', issueSize: ipo.Issue_Size || ''
-            });
-          });
-        }
-      } catch(bseErr) {}
+        var data = await fetchJSON(BSE + '/IPODetail/w?type=upcoming', BSE_REF);
+        if (Array.isArray(data)) data.forEach(function(ipo) {
+          ipos.push({ name: ipo.Issue_Name||'', issueType: ipo.Issue_Type||'IPO', priceBand: ipo.Price_Band||'', openDate: ipo.Issue_Open||'', closeDate: ipo.Issue_Close||'', issueSize: ipo.Issue_Size||'' });
+        });
+      } catch(e) {}
     }
-
     res.json(ipos);
-  } catch(e) {
-    res.json([]);
-  }
+  } catch(e) { res.json([]); }
 });
 
 // ============================================================
-// /ipos/recent — Moneycontrol listed + closed pages + BSE
+// /ipos/recent
 // ============================================================
 app.get('/ipos/recent', async (req, res) => {
   try {
     var ipos = [];
-
-    // Try listed-ipos page
     try {
       var html = await fetchText('https://www.moneycontrol.com/ipo/listed-ipos/', 'https://www.moneycontrol.com/');
       ipos = extractMCIpos(html);
-      console.log('MC listed IPOs found:', ipos.length);
+      console.log('MC listed IPOs:', ipos.length);
     } catch(e) {}
 
-    // Try main IPO page for closed ones
     if (ipos.length < 3) {
       try {
         var html2 = await fetchText('https://www.moneycontrol.com/ipo/', 'https://www.moneycontrol.com/');
         var all = extractMCIpos(html2);
-        var closed = all.filter(function(i) {
-          var s = (i.status || '').toLowerCase();
-          return s === 'listed' || s === 'closed' || s === 'allotted';
-        });
-        closed.forEach(function(ipo) {
-          var exists = ipos.some(function(e) { return e.name.substring(0,15) === ipo.name.substring(0,15); });
-          if (!exists) ipos.push(ipo);
-        });
+        all.filter(function(i) { var s=(i.status||'').toLowerCase(); return s==='listed'||s==='closed'||s==='allotted'; })
+          .forEach(function(ipo) {
+            if (!ipos.some(function(e) { return e.name.substring(0,15) === ipo.name.substring(0,15); }))
+              ipos.push(ipo);
+          });
       } catch(e) {}
     }
 
-    // BSE fallback
     if (ipos.length === 0) {
       try {
-        var data = await fetchJSON('https://api.bseindia.com/BseIndiaAPI/api/IPODetail/w?type=recent', 'https://www.bseindia.com/');
-        if (Array.isArray(data)) {
-          data.forEach(function(ipo) {
-            ipos.push({
-              name: ipo.Issue_Name || '', issueType: ipo.Issue_Type || 'IPO',
-              priceBand: ipo.Price_Band || '', openDate: ipo.Issue_Open || '',
-              closeDate: ipo.Issue_Close || '', issueSize: ipo.Issue_Size || ''
-            });
-          });
-        }
+        var data = await fetchJSON(BSE + '/IPODetail/w?type=recent', BSE_REF);
+        if (Array.isArray(data)) data.forEach(function(ipo) {
+          ipos.push({ name: ipo.Issue_Name||'', issueType: ipo.Issue_Type||'IPO', priceBand: ipo.Price_Band||'', openDate: ipo.Issue_Open||'', closeDate: ipo.Issue_Close||'', issueSize: ipo.Issue_Size||'' });
+        });
       } catch(e) {}
     }
-
     res.json(ipos);
-  } catch(e) {
-    res.json([]);
-  }
+  } catch(e) { res.json([]); }
 });
 
 // ============================================================
-// /picks — ET Recommendations RSS (FIXED: filter stock-specific)
+// /picks — ET RSS (FIXED: better filtering, skip generic titles)
 // ============================================================
 app.get('/picks', async (req, res) => {
   try {
     var picks = [];
-    
+    var seenTitles = {};
+
     // Source 1: ET Stock Recommendations
     try {
-      var xml = await fetchText(
-        'https://economictimes.indiatimes.com/markets/stocks/recos/rssfeeds/2146844.cms',
-        'https://economictimes.indiatimes.com/'
-      );
+      var xml = await fetchText('https://economictimes.indiatimes.com/markets/stocks/recos/rssfeeds/2146844.cms', 'https://economictimes.indiatimes.com/');
       var items = parseRSSItems(xml);
       items.forEach(function(item) {
-        // Filter: only stock-related picks (contains buy/sell/target/stock keywords)
-        var t = item.title.toLowerCase();
-        if (t.includes('buy') || t.includes('sell') || t.includes('target') || 
-            t.includes('stock') || t.includes('share') || t.includes('invest') ||
-            t.includes('nifty') || t.includes('market') || t.includes('rally') ||
-            t.includes('bullish') || t.includes('bearish') || t.includes('portfolio')) {
-          picks.push({ stock: item.title, reason: 'ET Recommend', link: item.link });
-        }
+        var t = (item.title || '').trim();
+        // SKIP generic/broken titles
+        if (t.length < 15) return;
+        if (/^share price$/i.test(t)) return;
+        if (/^stock$/i.test(t)) return;
+        if (/^market$/i.test(t)) return;
+        if (seenTitles[t.toLowerCase()]) return;
+        seenTitles[t.toLowerCase()] = true;
+        picks.push({ stock: t, reason: 'ET Recommend', link: item.link });
       });
-    } catch(e) {}
+    } catch(e) { console.log('Picks RSS1 failed:', e.message); }
 
     // Source 2: ET Expert Views
-    if (picks.length < 5) {
+    if (picks.length < 8) {
       try {
-        var xml2 = await fetchText(
-          'https://economictimes.indiatimes.com/markets/expert-view/rssfeeds/2146849.cms',
-          'https://economictimes.indiatimes.com/'
-        );
+        var xml2 = await fetchText('https://economictimes.indiatimes.com/markets/expert-view/rssfeeds/2146849.cms', 'https://economictimes.indiatimes.com/');
         var items2 = parseRSSItems(xml2);
-        items2.slice(0, 10 - picks.length).forEach(function(item) {
-          picks.push({ stock: item.title, reason: 'Expert View', link: item.link });
+        items2.forEach(function(item) {
+          if (picks.length >= 12) return;
+          var t = (item.title || '').trim();
+          if (t.length < 15 || seenTitles[t.toLowerCase()]) return;
+          seenTitles[t.toLowerCase()] = true;
+          picks.push({ stock: t, reason: 'Expert View', link: item.link });
         });
       } catch(e) {}
     }
 
-    // Source 3: Fallback to stock news
-    if (picks.length < 5) {
+    // Source 3: ET Stock News (only pick-worthy articles)
+    if (picks.length < 6) {
       try {
-        var xml3 = await fetchText(
-          'https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms',
-          'https://economictimes.indiatimes.com/'
-        );
+        var xml3 = await fetchText('https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms', 'https://economictimes.indiatimes.com/');
         var items3 = parseRSSItems(xml3);
-        items3.slice(0, 10 - picks.length).forEach(function(item) {
-          var t = item.title.toLowerCase();
-          if (t.includes('buy') || t.includes('target') || t.includes('stock pick') || t.includes('multibagger')) {
-            picks.push({ stock: item.title, reason: 'Market News', link: item.link });
+        items3.forEach(function(item) {
+          if (picks.length >= 12) return;
+          var t = (item.title || '').trim();
+          var tl = t.toLowerCase();
+          if (t.length < 15 || seenTitles[tl]) return;
+          // Only stock-recommendation-type articles
+          if (tl.includes('buy') || tl.includes('target') || tl.includes('multibagger') || tl.includes('pick') || tl.includes('breakout') || tl.includes('bullish')) {
+            seenTitles[tl] = true;
+            picks.push({ stock: t, reason: 'Market News', link: item.link });
           }
         });
       } catch(e) {}
     }
 
+    console.log('Picks total:', picks.length);
     res.json(picks.slice(0, 12));
-  } catch(e) {
-    res.json([]);
-  }
+  } catch(e) { res.json([]); }
 });
 
 // ============================================================
-// NEW: /52week — 52 Week High & Low stocks
+// /52week — BSE API: 52 Week High & Low Stocks
 // ============================================================
 app.get('/52week', async (req, res) => {
   try {
     var result = { high: [], low: [] };
 
-    // 52 Week Highs
+    // BSE API 52 Week High
     try {
-      var hhtml = await fetchText('https://www.moneycontrol.com/stocks/marketstats/nsehigh/index.php', 'https://www.moneycontrol.com/');
-      var hRows = parseHTMLTable(hhtml);
-      for (var i = 0; i < hRows.length && result.high.length < 20; i++) {
-        var cells = hRows[i];
-        if (cells.length < 3) continue;
-        var name = cells[0];
-        if (!name || name.length < 2 || /^(company|stock|name|sr|s\.no|#)/i.test(name)) continue;
-        var nums = [];
-        for (var c = 1; c < cells.length; c++) {
-          var val = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
-          if (/^-?\d+\.?\d*$/.test(val) && parseFloat(val) > 0) nums.push(parseFloat(val));
-        }
-        if (nums.length >= 1) {
-          result.high.push({ stock: name, price: nums[0], high52: nums[1] || nums[0], change: nums.length > 2 ? nums[nums.length-1] : 0 });
-        }
-      }
-      console.log('52W highs found:', result.high.length);
-    } catch(e) { console.log('52W high failed:', e.message); }
+      var hData = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=52high', BSE_REF);
+      result.high = parseBSEStocks(hData).slice(0, 20).map(function(s) {
+        return { stock: s.stock, price: s.price, high52: s.high52 || s.price, change: s.change };
+      });
+      console.log('BSE 52W high:', result.high.length);
+    } catch(e) { console.log('BSE 52W high failed:', e.message); }
 
-    // 52 Week Lows
+    // BSE API 52 Week Low
     try {
-      var lhtml = await fetchText('https://www.moneycontrol.com/stocks/marketstats/nselow/index.php', 'https://www.moneycontrol.com/');
-      var lRows = parseHTMLTable(lhtml);
-      for (var i = 0; i < lRows.length && result.low.length < 20; i++) {
-        var cells = lRows[i];
-        if (cells.length < 3) continue;
-        var name = cells[0];
-        if (!name || name.length < 2 || /^(company|stock|name|sr|s\.no|#)/i.test(name)) continue;
-        var nums = [];
-        for (var c = 1; c < cells.length; c++) {
-          var val = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
-          if (/^-?\d+\.?\d*$/.test(val) && parseFloat(val) > 0) nums.push(parseFloat(val));
-        }
-        if (nums.length >= 1) {
-          result.low.push({ stock: name, price: nums[0], low52: nums[1] || nums[0], change: nums.length > 2 ? nums[nums.length-1] : 0 });
-        }
-      }
-      console.log('52W lows found:', result.low.length);
-    } catch(e) { console.log('52W low failed:', e.message); }
+      var lData = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=52low', BSE_REF);
+      result.low = parseBSEStocks(lData).slice(0, 20).map(function(s) {
+        return { stock: s.stock, price: s.price, low52: s.low52 || s.price, change: s.change };
+      });
+      console.log('BSE 52W low:', result.low.length);
+    } catch(e) { console.log('BSE 52W low failed:', e.message); }
+
+    // Fallback: ET RSS for 52-week related news
+    if (result.high.length === 0 && result.low.length === 0) {
+      try {
+        var xml = await fetchText('https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms', 'https://economictimes.indiatimes.com/');
+        var items = parseRSSItems(xml);
+        items.forEach(function(item) {
+          var t = (item.title || '').toLowerCase();
+          if (t.includes('52') || t.includes('52-week') || t.includes('year high') || t.includes('year low') || t.includes('all-time')) {
+            if (t.includes('high') || t.includes('rally')) {
+              result.high.push({ stock: item.title, price: 0, high52: 0, change: 0, link: item.link });
+            } else {
+              result.low.push({ stock: item.title, price: 0, low52: 0, change: 0, link: item.link });
+            }
+          }
+        });
+      } catch(e) {}
+    }
 
     res.json(result);
-  } catch(e) {
-    res.json({ high: [], low: [] });
-  }
+  } catch(e) { res.json({ high: [], low: [] }); }
 });
 
 // ============================================================
-// NEW: /active — Most Active Stocks by Volume
+// /active — BSE API: Most Active by Volume
 // ============================================================
 app.get('/active', async (req, res) => {
   try {
     var stocks = [];
 
+    // BSE API — Most Active by Value
     try {
-      var html = await fetchText('https://www.moneycontrol.com/stocks/marketstats/nsemact1/index.php', 'https://www.moneycontrol.com/');
-      var rows = parseHTMLTable(html);
-      for (var i = 0; i < rows.length && stocks.length < 25; i++) {
-        var cells = rows[i];
-        if (cells.length < 3) continue;
-        var name = cells[0];
-        if (!name || name.length < 2 || /^(company|stock|name|sr|s\.no|#)/i.test(name)) continue;
-        var nums = [];
-        for (var c = 1; c < cells.length; c++) {
-          var val = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
-          if (/^-?\d+\.?\d*$/.test(val)) nums.push(parseFloat(val));
-        }
-        if (nums.length >= 2) {
-          stocks.push({
-            stock: name,
-            price: nums[0] > 5 ? nums[0] : 0,
-            volume: nums.find(n => n > 10000) || 0,
-            change: nums.find(n => Math.abs(n) < 100 && n !== nums[0]) || 0
-          });
-        }
-      }
-      console.log('Most active found:', stocks.length);
-    } catch(e) { console.log('Active stocks failed:', e.message); }
+      var data = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=volume', BSE_REF);
+      stocks = parseBSEStocks(data).slice(0, 25).map(function(s) {
+        return { stock: s.stock, price: s.price, volume: s.volume, change: s.change };
+      });
+      console.log('BSE most active:', stocks.length);
+    } catch(e) { console.log('BSE active failed:', e.message); }
+
+    // Try alternate BSE endpoint
+    if (stocks.length === 0) {
+      try {
+        var data2 = await fetchJSON(BSE + '/StockReachGraph/w?scripcode=&flag=0&fromdate=&todate=&seression=&type=value', BSE_REF);
+        stocks = parseBSEStocks(data2).slice(0, 25).map(function(s) {
+          return { stock: s.stock, price: s.price, volume: s.volume, change: s.change };
+        });
+        console.log('BSE active (value):', stocks.length);
+      } catch(e) {}
+    }
 
     res.json(stocks);
-  } catch(e) {
-    res.json([]);
-  }
+  } catch(e) { res.json([]); }
 });
 
 // ============================================================
-// NEW: /fiidii — FII/DII Activity Data
+// /fiidii — FII/DII Activity
+// Source: MoneyControl AJAX endpoint + NSDL fallback
 // ============================================================
 app.get('/fiidii', async (req, res) => {
   try {
     var result = { fii: [], dii: [], summary: {} };
 
-    // Try Moneycontrol FII/DII page
+    // Try MC FII/DII page and extract from HTML
     try {
       var html = await fetchText('https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php', 'https://www.moneycontrol.com/');
-      var rows = parseHTMLTable(html);
       
-      for (var i = 0; i < rows.length; i++) {
-        var cells = rows[i];
-        if (cells.length < 3) continue;
-        var label = cells[0].toLowerCase();
-        
-        // Look for FII/FPI rows
-        if (label.includes('fii') || label.includes('fpi') || label.includes('foreign')) {
-          var nums = [];
-          for (var c = 1; c < cells.length; c++) {
-            var val = cells[c].replace(/[₹,()]/g, '').trim();
-            if (/^-?\d+\.?\d*$/.test(val)) nums.push(parseFloat(val));
-          }
-          if (nums.length >= 2) {
-            result.fii.push({
-              date: cells[0],
-              buy: nums[0] || 0,
-              sell: nums[1] || 0,
-              net: nums[2] || (nums[0] - nums[1])
+      // Try to find FII/DII data in embedded JSON or script tags
+      var scriptRegex = /var\s+(?:fiiData|diiData|fii_data|dii_data|chartData)\s*=\s*(\[[\s\S]*?\]);/g;
+      var sm;
+      while ((sm = scriptRegex.exec(html)) !== null) {
+        try {
+          var arr = JSON.parse(sm[1]);
+          if (Array.isArray(arr) && arr.length > 0) {
+            arr.forEach(function(r) {
+              var entry = { date: r.date || r.Date || '', buy: parseFloat(r.buy || r.Buy || r.gross_purchase || 0), sell: parseFloat(r.sell || r.Sell || r.gross_sales || 0), net: parseFloat(r.net || r.Net || 0) };
+              if (!entry.net) entry.net = entry.buy - entry.sell;
+              if (sm[0].toLowerCase().includes('fii')) result.fii.push(entry);
+              else result.dii.push(entry);
             });
           }
-        }
-        
-        // Look for DII rows
-        if (label.includes('dii') || label.includes('domestic') || label.includes('mutual')) {
-          var nums2 = [];
-          for (var c = 1; c < cells.length; c++) {
-            var val = cells[c].replace(/[₹,()]/g, '').trim();
-            if (/^-?\d+\.?\d*$/.test(val)) nums2.push(parseFloat(val));
-          }
-          if (nums2.length >= 2) {
-            result.dii.push({
-              date: cells[0],
-              buy: nums2[0] || 0,
-              sell: nums2[1] || 0,
-              net: nums2[2] || (nums2[0] - nums2[1])
-            });
+        } catch(e) {}
+      }
+
+      // Fallback: parse HTML tables
+      if (result.fii.length === 0) {
+        var trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+        var trMatch;
+        while ((trMatch = trRegex.exec(html)) !== null) {
+          var tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+          var cells = [];
+          var td;
+          while ((td = tdRegex.exec(trMatch[1])) !== null) cells.push(strip(td[1]));
+          if (cells.length >= 4) {
+            var label = (cells[0] || '').toLowerCase();
+            var nums = [];
+            for (var c = 1; c < cells.length; c++) {
+              var v = cells[c].replace(/[₹,()]/g, '').trim();
+              if (/^-?\d+\.?\d*$/.test(v)) nums.push(parseFloat(v));
+            }
+            if (nums.length >= 2) {
+              var entry = { date: cells[0], buy: nums[0], sell: nums[1], net: nums[2] || (nums[0] - nums[1]) };
+              if (label.includes('fii') || label.includes('fpi') || label.includes('foreign')) result.fii.push(entry);
+              else if (label.includes('dii') || label.includes('domestic') || label.includes('mutual')) result.dii.push(entry);
+            }
           }
         }
       }
       console.log('FII entries:', result.fii.length, 'DII entries:', result.dii.length);
-    } catch(e) { console.log('FII/DII MC failed:', e.message); }
+    } catch(e) { console.log('MC FII/DII failed:', e.message); }
 
-    // Fallback: NSDL FPI data
+    // Fallback: Generate from NSDL
     if (result.fii.length === 0) {
       try {
-        var nsdlHtml = await fetchText('https://www.fpi.nsdl.co.in/web/StaticReports/Fortnightly/FPIFortnightlyReport.html', 'https://www.fpi.nsdl.co.in/');
-        var nsdlRows = parseHTMLTable(nsdlHtml);
-        for (var i = 0; i < nsdlRows.length && result.fii.length < 10; i++) {
-          var cells = nsdlRows[i];
-          if (cells.length >= 3) {
-            var nums = [];
-            for (var c = 0; c < cells.length; c++) {
-              var val = cells[c].replace(/[₹,()]/g, '').trim();
-              if (/^-?\d+\.?\d*$/.test(val)) nums.push(parseFloat(val));
+        var nHtml = await fetchText('https://www.fpi.nsdl.co.in/web/StaticReports/Fortnightly/FPIFortnightlyReport.html', 'https://www.fpi.nsdl.co.in/');
+        var trR = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+        var trM;
+        while ((trM = trR.exec(nHtml)) !== null && result.fii.length < 10) {
+          var tdR = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+          var cells2 = [];
+          var td2;
+          while ((td2 = tdR.exec(trM[1])) !== null) cells2.push(strip(td2[1]));
+          if (cells2.length >= 3) {
+            var nums2 = [];
+            for (var c2 = 0; c2 < cells2.length; c2++) {
+              var v2 = cells2[c2].replace(/[₹,()]/g, '').trim();
+              if (/^-?\d+\.?\d*$/.test(v2)) nums2.push(parseFloat(v2));
             }
-            if (nums.length >= 2) {
-              result.fii.push({ date: cells[0], buy: nums[0], sell: nums[1], net: nums[2] || (nums[0]-nums[1]) });
+            if (nums2.length >= 2) {
+              result.fii.push({ date: cells2[0], buy: nums2[0], sell: nums2[1], net: nums2[2] || (nums2[0]-nums2[1]) });
             }
           }
         }
-      } catch(e) {}
+        console.log('NSDL FII entries:', result.fii.length);
+      } catch(e) { console.log('NSDL failed:', e.message); }
     }
 
     // Summary
     if (result.fii.length > 0) {
-      var lastFii = result.fii[0];
-      result.summary.fiiNet = lastFii.net;
-      result.summary.fiiStatus = lastFii.net >= 0 ? 'Buying' : 'Selling';
+      result.summary.fiiNet = result.fii[0].net;
+      result.summary.fiiStatus = result.fii[0].net >= 0 ? 'Buying' : 'Selling';
     }
     if (result.dii.length > 0) {
-      var lastDii = result.dii[0];
-      result.summary.diiNet = lastDii.net;
-      result.summary.diiStatus = lastDii.net >= 0 ? 'Buying' : 'Selling';
+      result.summary.diiNet = result.dii[0].net;
+      result.summary.diiStatus = result.dii[0].net >= 0 ? 'Buying' : 'Selling';
     }
 
     res.json(result);
-  } catch(e) {
-    res.json({ fii: [], dii: [], summary: {} });
-  }
+  } catch(e) { res.json({ fii: [], dii: [], summary: {} }); }
 });
 
 // ============================================================
-// NEW: /premarket — Pre-market / Opening Stocks Data
-// Source: Moneycontrol pre-open market data
+// /premarket — Pre-open Market Data (BSE + MC)
 // ============================================================
 app.get('/premarket', async (req, res) => {
   try {
     var stocks = [];
 
-    // Try MC pre-open market page
+    // Try MC pre-open
     try {
       var html = await fetchText('https://www.moneycontrol.com/stocks/marketstats/pre_open/nifty.html', 'https://www.moneycontrol.com/');
-      var rows = parseHTMLTable(html);
-      for (var i = 0; i < rows.length && stocks.length < 30; i++) {
-        var cells = rows[i];
-        if (cells.length < 3) continue;
-        var name = cells[0];
-        if (!name || name.length < 2 || /^(company|stock|name|sr|s\.no|#|symbol)/i.test(name)) continue;
-        var nums = [];
-        for (var c = 1; c < cells.length; c++) {
-          var val = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
-          if (/^-?\d+\.?\d*$/.test(val)) nums.push(parseFloat(val));
-        }
-        if (nums.length >= 2) {
-          var price = nums.find(n => n > 5) || 0;
-          var change = nums.find(n => Math.abs(n) < 100 && n !== price) || 0;
-          stocks.push({ stock: name, price: price, change: change, prevClose: 0 });
-        }
-      }
-      console.log('Pre-market stocks found:', stocks.length);
-    } catch(e) { console.log('Pre-market MC failed:', e.message); }
-
-    // Fallback: BSE pre-open
-    if (stocks.length === 0) {
-      try {
-        var bseHtml = await fetchText('https://www.bseindia.com/markets/equity/EQReports/pre-open.html', 'https://www.bseindia.com/');
-        var bseRows = parseHTMLTable(bseHtml);
-        for (var i = 0; i < bseRows.length && stocks.length < 30; i++) {
-          var cells = bseRows[i];
-          if (cells.length < 3) continue;
+      var trR = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      var trM;
+      while ((trM = trR.exec(html)) !== null && stocks.length < 50) {
+        var tdR = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+        var cells = [];
+        var td;
+        while ((td = tdR.exec(trM[1])) !== null) cells.push(strip(td[1]));
+        if (cells.length >= 3) {
           var name = cells[0];
-          if (!name || name.length < 2 || /^(company|stock|name|sr)/i.test(name)) continue;
+          if (!name || name.length < 2 || /^(company|stock|name|sr|s\.no|#|symbol)/i.test(name)) continue;
           var nums = [];
           for (var c = 1; c < cells.length; c++) {
-            var val = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
-            if (/^-?\d+\.?\d*$/.test(val)) nums.push(parseFloat(val));
+            var v = cells[c].replace(/[₹,%()]/g, '').replace(/,/g, '').trim();
+            if (/^-?\d+\.?\d*$/.test(v)) nums.push(parseFloat(v));
           }
           if (nums.length >= 1) {
-            stocks.push({ stock: name, price: nums[0], change: nums.length > 1 ? nums[nums.length-1] : 0, prevClose: 0 });
+            var price = nums.find(function(n) { return n > 5; }) || 0;
+            var change = 0;
+            for (var i = nums.length - 1; i >= 0; i--) {
+              if (Math.abs(nums[i]) < 100 && nums[i] !== price) { change = nums[i]; break; }
+            }
+            stocks.push({ stock: name, price: price, change: change, prevClose: 0 });
           }
         }
-      } catch(e) {}
-    }
+      }
+      console.log('MC pre-market:', stocks.length);
+    } catch(e) { console.log('MC premarket failed:', e.message); }
 
     res.json(stocks);
-  } catch(e) {
-    res.json([]);
-  }
+  } catch(e) { res.json([]); }
 });
 
 // ============================================================
@@ -702,20 +595,11 @@ app.get('/premarket', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'SRJahir Stocks API v7',
-    sources: {
-      movers: 'Moneycontrol + BSE fallback',
-      ipos: 'Moneycontrol + BSE fallback',
-      news: 'Economic Times RSS',
-      picks: 'ET Recommendations + Expert Views',
-      '52week': 'Moneycontrol 52W High/Low',
-      active: 'Moneycontrol Most Active',
-      fiidii: 'Moneycontrol FII/DII + NSDL',
-      premarket: 'Moneycontrol Pre-open'
-    },
+    service: 'SRJahir Stocks API v8',
+    sources: { movers: 'BSE API + MC fallback', ipos: 'Moneycontrol + BSE', news: 'ET RSS', picks: 'ET Recos + Expert Views', '52week': 'BSE API', active: 'BSE API', fiidii: 'MC + NSDL', premarket: 'MC Pre-open' },
     endpoints: ['/news', '/movers', '/ipos/upcoming', '/ipos/recent', '/picks', '/52week', '/active', '/fiidii', '/premarket'],
     timestamp: new Date().toISOString()
   });
 });
 
-app.listen(PORT, () => console.log('SRJahir Stocks API v7 running on port ' + PORT));
+app.listen(PORT, () => console.log('SRJahir Stocks API v8 running on port ' + PORT));
